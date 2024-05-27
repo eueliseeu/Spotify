@@ -1,3 +1,4 @@
+import time
 from PyQt5 import QtCore, QtGui, QtWidgets
 import os
 import subprocess
@@ -5,21 +6,51 @@ import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 
 DOWNLOADS_FOLDER = os.path.join(os.path.expanduser('~'), 'Downloads')
-DOWNLOAD_MEDIA_PLAY_FOLDER = os.path.join(DOWNLOADS_FOLDER, 'Rádio indoor')
+DOWNLOAD_MEDIA_PLAY_FOLDER = os.path.join(DOWNLOADS_FOLDER, 'Músicas')
 
 if not os.path.exists(DOWNLOAD_MEDIA_PLAY_FOLDER):
     os.makedirs(DOWNLOAD_MEDIA_PLAY_FOLDER)
 
 class DownloadThread(QtCore.QThread):
+    progress_updated = QtCore.pyqtSignal(str, int, QtGui.QPixmap)
     download_finished = QtCore.pyqtSignal()
 
     def __init__(self, playlist_id, output_directory):
         super().__init__()
         self.playlist_id = playlist_id
         self.output_directory = output_directory
+        self.failed_tracks = []  # Lista para armazenar as músicas que não foram baixadas
 
     def run(self):
-        download_spotify_playlist_tracks(self.playlist_id, self.output_directory)
+        sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id='f164aa7c07fd4eff94be21e9c270b4a0', client_secret='80a776ef99bf453cbd103f1e3ccafec0'))
+        playlist = sp.playlist_tracks(self.playlist_id)
+        total_tracks = len(playlist['items'])
+
+        for i, track in enumerate(playlist['items']):
+            track_name = track['track']['name']
+            artist_name = track['track']['artists'][0]['name']
+            track_url = track['track']['external_urls']['spotify']
+            album_cover_url = track['track']['album']['images'][0]['url']
+            album_cover_pixmap = QtGui.QPixmap()
+            album_cover_pixmap.loadFromData(sp._get(album_cover_url))
+
+            print(f"Baixando: {track_name} - {artist_name}")
+            try:
+                subprocess.run(["spotdl", track_url, "--output", self.output_directory], check=True)
+            except subprocess.CalledProcessError:
+                self.failed_tracks.append(f"{track_name} - {artist_name}")
+                print(f"Erro ao baixar: {track_name} - {artist_name}")
+
+            progress_percentage = int(((i + 1) / total_tracks) * 100)
+            self.progress_updated.emit(f"✔ {track_name} - {artist_name}", progress_percentage, album_cover_pixmap)
+        
+        if self.failed_tracks:
+            failed_tracks_file = os.path.join(self.output_directory, 'failed_tracks.txt')
+            with open(failed_tracks_file, 'w') as file:
+                file.write("Músicas que não foram baixadas:\n")
+                for track in self.failed_tracks:
+                    file.write(f"{track}\n")
+
         self.download_finished.emit()
 
 class Ui_MainWindow(object):
@@ -44,8 +75,9 @@ class Ui_MainWindow(object):
 "font-size: 13px;\n"
 "color: white;\n"
 "")
-        self.lineEdit.setMaxLength(30)
+        self.lineEdit.setMaxLength(100)
         self.lineEdit.setObjectName("lineEdit")
+        self.lineEdit.setPlaceholderText('https://open.spotify.com/playlist/3DrQOdOEaGrh1iYJKQZ52T')
         self.label = QtWidgets.QLabel(self.centralwidget)
         self.label.setGeometry(QtCore.QRect(150, 222, 21, 20))
         self.label.setStyleSheet("background: transparent")
@@ -89,6 +121,37 @@ class Ui_MainWindow(object):
         self.label_4.setFont(font)
         self.label_4.setStyleSheet("color: white;")
         self.label_4.setObjectName("label_4")
+
+        self.progressBar = QtWidgets.QProgressBar(self.centralwidget)
+        self.progressBar.setGeometry(QtCore.QRect(138, 260, 507, 23))
+        self.progressBar.setStyleSheet("QProgressBar {\n"
+                                       "    border: 0px solid grey;\n"
+                                       "    border-radius: 10px;\n"
+                                       "    background: #404040;\n"
+                                       "    color: #404040;"
+                                       "    text-align: center;"
+                                       "}\n"
+                                       "QProgressBar::chunk {\n"
+                                       "    background: #1FDF64;\n"
+                                       "    width: 20px;\n"
+                                       "    border-radius: 5px;"
+                                       "}")
+        self.progressBar.setProperty("value", 0)
+        self.progressBar.setObjectName("progressBar")
+
+        self.statusLabel = QtWidgets.QLabel(self.centralwidget)
+        self.statusLabel.setGeometry(QtCore.QRect(138, 290, 507, 23))
+        self.statusLabel.setFont(font)
+        self.statusLabel.setStyleSheet("color: white;")
+        self.statusLabel.setAlignment(QtCore.Qt.AlignCenter)
+        self.statusLabel.setObjectName("statusLabel")
+
+        self.albumCoverLabel = QtWidgets.QLabel(self.centralwidget)
+        self.albumCoverLabel.setGeometry(QtCore.QRect(322, 320, 140, 140))
+        self.albumCoverLabel.setStyleSheet("background: transparent")
+        self.albumCoverLabel.setScaledContents(True)
+        self.albumCoverLabel.setObjectName("albumCoverLabel")
+
         MainWindow.setCentralWidget(self.centralwidget)
 
         self.retranslateUi(MainWindow)
@@ -111,32 +174,61 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton.clicked.connect(self.start_download)
 
     def start_download(self):
-        self.playlist_id = self.ui.lineEdit.text()
+        input_text = self.ui.lineEdit.text()
+        self.playlist_id = extract_playlist_id(input_text)
         self.download_thread = DownloadThread(self.playlist_id, self.output_directory)
+        self.download_thread.progress_updated.connect(self.update_progress)
         self.download_thread.download_finished.connect(self.download_finished)
         self.download_thread.start()
 
+    def update_progress(self, status, progress, album_cover_pixmap):
+        self.ui.statusLabel.setText(status)
+        self.ui.progressBar.setValue(progress)
+        self.ui.albumCoverLabel.setPixmap(album_cover_pixmap)
+
     def download_finished(self):
-        print("Download concluído.")
+        self.ui.statusLabel.setText("Download concluído.")
+        self.ui.progressBar.setValue(100)
+
+#Extraindo ID da URL da Playlist do Spotify
+
+def extract_playlist_id(url_or_id):
+    if "spotify.com/playlist/" in url_or_id:
+        return url_or_id.split("spotify.com/playlist/")[1].split("?")[0]
+    return url_or_id
 
 def download_spotify_playlist_tracks(playlist_id, output_directory):
     try:
-        # Autenticar a aplicação com as credenciais do cliente do Spotify
         sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id='f164aa7c07fd4eff94be21e9c270b4a0', client_secret='80a776ef99bf453cbd103f1e3ccafec0'))
-
-        # Buscar as faixas na playlist do Spotify
         playlist = sp.playlist_tracks(playlist_id)
+        total_tracks = len(playlist['items'])
+        failed_tracks = []
 
-        # Iterar sobre as faixas e obter informações
-        for track in playlist['items']:
+        for i, track in enumerate(playlist['items']):
             track_name = track['track']['name']
             artist_name = track['track']['artists'][0]['name']
             track_url = track['track']['external_urls']['spotify']
-            
-            # Baixar a faixa usando SpotDL
+
             print(f"Baixando: {track_name} - {artist_name}")
-            subprocess.run(["spotdl", track_url, "--output", output_directory])
-            
+            try:
+                subprocess.run(["spotdl", track_url, "--output", output_directory], check=True)
+            except subprocess.CalledProcessError:
+                failed_tracks.append(f"{track_name} - {artist_name}")
+                print(f"Erro ao baixar: {track_name} - {artist_name}")
+
+            progress_percentage = int(((i + 1) / total_tracks) * 100)
+            time.sleep(1)
+            DownloadThread.progress_updated.emit(f"✔ {track_name} - {artist_name}", progress_percentage)
+        
+        if failed_tracks:
+            failed_tracks_file = os.path.join(output_directory, 'failed_tracks.txt')
+            with open(failed_tracks_file, 'w') as file:
+                file.write("Músicas que não foram baixadas:\n")
+                for track in failed_tracks:
+                    file.write(f"{track}\n")
+
+        DownloadThread.download_finished.emit()
+
     except Exception as e:
         print(f"Erro ao baixar a playlist do Spotify: {e}")
 
