@@ -19,7 +19,7 @@ class DownloadThread(QtCore.QThread):
         super().__init__()
         self.playlist_id = playlist_id
         self.output_directory = output_directory
-        self.failed_tracks = []  # Lista para armazenar as músicas que não foram baixadas
+        self.failed_tracks = []  
 
     def run(self):
         sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id='f164aa7c07fd4eff94be21e9c270b4a0', client_secret='80a776ef99bf453cbd103f1e3ccafec0'))
